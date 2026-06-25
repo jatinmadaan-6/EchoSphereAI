@@ -1,28 +1,31 @@
-const audio = new Audio("../Data/HansZimmer.mp3");
-
 const audioContext = new AudioContext();
-const source = audioContext.createMediaElementSource(audio);
 
-const panner = audioContext.createPanner();
-
-source.connect(panner);
-panner.connect(audioContext.destination);
-
-document.getElementById("playBtn").addEventListener("click", async () => {
+document.getElementById("startButton").addEventListener("click", async () => {
 
     await audioContext.resume();
 
-    // Start on the left
-    panner.positionX.value = -5;
+    const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true
+    });
+
+    const source = audioContext.createMediaStreamSource(stream);
+
+    const gain = audioContext.createGain();
+    gain.gain.value = 1;
+
+    const panner = audioContext.createPanner();
+
+    panner.panningModel = "HRTF";
+    panner.distanceModel = "inverse";
+
+    // Position the sound slightly to the left
+    panner.positionX.value = -2;
     panner.positionY.value = 0;
-    panner.positionZ.value = 0;
+    panner.positionZ.value = -1;
 
-    audio.currentTime = 0;
-    audio.play();
+    source.connect(gain);
+    gain.connect(panner);
+    panner.connect(audioContext.destination);
 
-    // Move to the right after 3 seconds
-    setTimeout(() => {
-        panner.positionX.value = 5;
-    }, 3000);
+    console.log("Microphone connected successfully!");
 });
-

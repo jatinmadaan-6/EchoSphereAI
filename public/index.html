@@ -1,23 +1,16 @@
-<!-- public/index.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>EchoSphere</title>
 </head>
+
 <body>
-    <h1>EchoSphere AI</h1>
-    <script src="/socket.io/socket.io.js"></script>
-    <script>
-       const socket = io();
 
-// For now, hardcode a room name for testing
-socket.emit('join-room', 'test-room');
+<h1>EchoSphere AI</h1>
 
-socket.on('peer-joined', (peerId) => {
-    console.log('Another peer joined:', peerId);
-});
-    </script>
-       <script src="app.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+
 </body>
 </html>

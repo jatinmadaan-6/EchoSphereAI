@@ -58,6 +58,19 @@ io.on("connection", (socket) => {
 
     });
 
+    
+socket.on("ice-candidate", ({roomId, candidate}) => {
+
+    console.log("ICE candidate received");
+
+    socket.to(roomId).emit(
+        "ice-candidate",
+        candidate
+    );
+
+});
+
+
 });
 
 server.listen(3000, () => {

@@ -1,648 +1,667 @@
 // ============================================================
-// SOCKET.IO CONNECTION
+// ECHOSPHERE AI — CLIENT
 // ============================================================
-// Socket.io is NOT carrying audio.
-// It only helps peers exchange:
-// 1. SDP (offer/answer)
-// 2. ICE candidates
 //
-// After WebRTC connects, audio goes peer-to-peer.
+// Current architecture:
+//
+// Socket.IO  -> signaling and room events
+// WebRTC     -> peer-to-peer microphone audio
+// Web Audio  -> gain + spatial positioning
+//
+// Mesh model:
+// One remote user = one RTCPeerConnection
+//
+// users[userId]
+//   ├── peerConnection
+//   ├── audio
+//   ├── position
+//   └── pendingIceCandidates
+//
 // ============================================================
 
-const socket = io();
+
+// ============================================================
+// 1. CONFIGURATION
+// ============================================================
 
 const ROOM_ID = "test-room";
 
+const ICE_SERVERS = [
+    {
+        urls: "stun:stun.l.google.com:19302"
+    }
+];
 
 
 // ============================================================
-// WEB AUDIO API SETUP
-// ============================================================
-// AudioContext is our audio processing engine.
-//
-// Currently:
-// Remote Audio → AudioContext → Speakers
-//
-// Later:
-// Remote Audio → GainNode → PannerNode → Speakers
-//
-// This is what will make EchoSphere spatial.
+// 2. SHARED APPLICATION STATE
 // ============================================================
 
+// Socket.IO handles signaling only.
+// Audio does not travel through this socket.
+const socket = io();
+
+// One AudioContext represents the shared audio world.
+// Each remote user gets a separate branch inside this context.
 const audioContext = new AudioContext();
 
+// Local microphone stream.
+// The same tracks are attached to each peer connection.
+let localStream = null;
 
+// Central store for all remote users.
+const users = {};
 
 
 // ============================================================
-// RTCPeerConnection SETUP
+// 3. USER MANAGEMENT
 // ============================================================
-// This object manages the WebRTC connection.
+
+// Creates one remote-user state object.
+function createUser(userId) {
+    return {
+        id: userId,
+
+        // One WebRTC connection per remote user.
+        peerConnection: createPeerConnection(userId),
+
+        // Filled when the remote audio track arrives.
+        audio: null,
+
+        // World position is the source of truth.
+        // Later Three.js and PannerNode will consume this.
+        position: {
+            x: 0,
+            y: 0,
+            z: 0
+        },
+
+        // ICE can arrive before remote SDP is ready.
+        // Queue early candidates and apply them later.
+        pendingIceCandidates: []
+    };
+}
+
+
+// Returns an existing user or creates one.
+function ensureUser(userId) {
+    if (!users[userId]) {
+        users[userId] = createUser(userId);
+    }
+
+    return users[userId];
+}
+
+
+// Removes all resources owned by one remote user.
+function removeUser(userId) {
+    const user = users[userId];
+
+    if (!user) return;
+
+    // Disconnect this user's audio branch.
+    if (user.audio) {
+        user.audio.source?.disconnect();
+        user.audio.gainNode?.disconnect();
+        user.audio.panner?.disconnect();
+    }
+
+    // End the WebRTC connection.
+    user.peerConnection?.close();
+
+    delete users[userId];
+
+    console.log("User removed:", userId);
+}
+
+
+// ============================================================
+// 4. WEB AUDIO PIPELINE
+// ============================================================
 //
-// It handles:
-// - SDP negotiation
-// - ICE candidates
-// - Media transport
-// - Connection state
+// Remote stream
+//      ↓
+// MediaStreamAudioSourceNode
+//      ↓
+// GainNode
+//      ↓
+// PannerNode
+//      ↓
+// Speakers
 //
-// STUN server helps discover our public-facing address.
 // ============================================================
 
+function createSpatialAudio(stream) {
+    const source =
+        audioContext.createMediaStreamSource(stream);
 
-const peerConnection = new RTCPeerConnection({
+    const gainNode =
+        audioContext.createGain();
 
-    iceServers: [
-
-        {
-            urls: "stun:stun.l.google.com:19302"
-        }
-
-    ]
-
-});
+    const panner =
+        audioContext.createPanner();
 
 
+    // Default volume.
+    gainNode.gain.value = 1;
 
+
+    // HRTF provides more realistic directional audio.
+    panner.panningModel = "HRTF";
+
+    // Distance behavior for future 3D movement.
+    panner.distanceModel = "inverse";
+    panner.refDistance = 1;
+    panner.maxDistance = 100;
+    panner.rolloffFactor = 1;
+
+
+    // Temporary default position.
+    // Later this comes from user.position.
+    panner.positionX.value = 0;
+    panner.positionY.value = 0;
+    panner.positionZ.value = -5;
+
+
+    // Build this user's audio branch.
+    source.connect(gainNode);
+    gainNode.connect(panner);
+    panner.connect(audioContext.destination);
+
+
+    return {
+        source,
+        gainNode,
+        panner
+    };
+}
 
 
 // ============================================================
-// GET MICROPHONE + ADD TRACKS
+// 5. PEER CONNECTION FACTORY
 // ============================================================
-// Problem:
-// WebRTC cannot magically access your microphone.
 //
-// getUserMedia() asks the browser for permission.
-//
-// The MediaStream contains tracks.
+// Creates one RTCPeerConnection for one remote user.
 //
 // Example:
 //
-// MediaStream
-//      |
-//      └── AudioTrack
+// users["alice"].peerConnection
+// users["bob"].peerConnection
 //
-// We attach these tracks to RTCPeerConnection.
 // ============================================================
 
-
-async function initializeMedia(){
-
-
-    const localStream =
-        await navigator.mediaDevices.getUserMedia({
-
-            audio:true
-
-        });
-
-
-
-    console.log(
-        "Local Stream:",
-        localStream
-    );
-
-
-
-    localStream.getTracks()
-    .forEach(track=>{
-
-
-        console.log(
-            "Adding Track:",
-            track
-        );
-
-
-        peerConnection.addTrack(
-
-            track,
-
-            localStream
-
-        );
-
-
+function createPeerConnection(userId) {
+    const pc = new RTCPeerConnection({
+        iceServers: ICE_SERVERS
     });
 
 
+    // --------------------------------------------------------
+    // SEND ICE CANDIDATES
+    // --------------------------------------------------------
+    //
+    // A candidate generated by this connection belongs only
+    // to this specific remote user.
+    //
+    pc.onicecandidate = (event) => {
+        if (!event.candidate) return;
+
+        socket.emit("ice-candidate", {
+            targetId: userId,
+            candidate: event.candidate
+        });
+
+        console.log(
+            "ICE candidate sent to:",
+            userId
+        );
+    };
+
+
+    // --------------------------------------------------------
+    // RECEIVE REMOTE AUDIO
+    // --------------------------------------------------------
+    //
+    // A track arriving here belongs to userId because this
+    // PeerConnection was created specifically for that user.
+    //
+    pc.ontrack = async (event) => {
+        console.log(
+            "Remote track received from:",
+            userId
+        );
+
+        // Prefer the stream supplied by WebRTC.
+        // Fallback creates one from the individual track.
+        const remoteStream =
+            event.streams[0] ||
+            new MediaStream([event.track]);
+
+
+        // Browsers may suspend AudioContext until interaction.
+        if (audioContext.state === "suspended") {
+            try {
+                await audioContext.resume();
+            } catch (error) {
+                console.warn(
+                    "AudioContext could not resume:",
+                    error
+                );
+            }
+        }
+
+
+        const user = users[userId];
+
+        if (!user) {
+            console.warn(
+                "Track received for unknown user:",
+                userId
+            );
+            return;
+        }
+
+
+        // Avoid leaving an old audio graph connected.
+        if (user.audio) {
+            user.audio.source?.disconnect();
+            user.audio.gainNode?.disconnect();
+            user.audio.panner?.disconnect();
+        }
+
+
+        user.audio =
+            createSpatialAudio(remoteStream);
+
+
+        console.log(
+            "Spatial audio attached to:",
+            userId
+        );
+    };
+
+
+    // --------------------------------------------------------
+    // CONNECTION DEBUGGING
+    // --------------------------------------------------------
+
+    pc.oniceconnectionstatechange = () => {
+        console.log(
+            `ICE State [${userId}]:`,
+            pc.iceConnectionState
+        );
+    };
+
+
+    pc.onconnectionstatechange = () => {
+        console.log(
+            `Connection State [${userId}]:`,
+            pc.connectionState
+        );
+    };
+
+
+    pc.onsignalingstatechange = () => {
+        console.log(
+            `Signaling State [${userId}]:`,
+            pc.signalingState
+        );
+    };
+
 
     console.log(
-        "All tracks added"
+        "PeerConnection created for:",
+        userId
     );
 
-
+    return pc;
 }
 
 
+// ============================================================
+// 6. LOCAL MICROPHONE
+// ============================================================
+
+// Requests microphone access once.
+// The same local tracks are reused across peer connections.
+async function initializeMedia() {
+    localStream =
+        await navigator.mediaDevices.getUserMedia({
+            audio: true
+        });
+
+    console.log(
+        "Local microphone ready"
+    );
+}
+
+
+// Attaches our microphone tracks to one peer connection.
+function addLocalTracks(pc) {
+    if (!localStream) {
+        throw new Error(
+            "Local microphone is not initialized"
+        );
+    }
+
+    localStream.getTracks().forEach((track) => {
+        pc.addTrack(track, localStream);
+    });
+}
 
 
 // ============================================================
-// START APPLICATION
+// 7. ICE QUEUE MANAGEMENT
 // ============================================================
-// Important order:
+
+// Adds queued ICE candidates after remote SDP becomes available.
+async function flushPendingIceCandidates(userId) {
+    const user = users[userId];
+
+    if (!user) return;
+
+    const pc = user.peerConnection;
+
+    while (user.pendingIceCandidates.length > 0) {
+        const candidate =
+            user.pendingIceCandidates.shift();
+
+        await pc.addIceCandidate(candidate);
+    }
+}
+
+
+// ============================================================
+// 8. APPLICATION STARTUP
+// ============================================================
+//
+// Order matters:
 //
 // 1. Get microphone
-// 2. Add tracks
-// 3. Join room
+// 2. Join signaling room
+// 3. Begin WebRTC negotiation
 //
-// Why?
-//
-// Because SDP must know what media we support.
-// If we create an offer before adding tracks,
-// the offer may contain no audio.
 // ============================================================
 
+async function start() {
+    try {
+        await initializeMedia();
 
-async function start(){
+        socket.emit(
+            "join-room",
+            ROOM_ID
+        );
 
-
-    await initializeMedia();
-
-
-
-    socket.emit(
-        "join-room",
-        ROOM_ID
-    );
-
-
-    console.log(
-        "Joined room"
-    );
-
-
+        console.log(
+            "Joined room:",
+            ROOM_ID
+        );
+    } catch (error) {
+        console.error(
+            "Application startup failed:",
+            error
+        );
+    }
 }
-
-
 
 start();
 
 
-
-
-
-
-
 // ============================================================
-// ICE CANDIDATE HANDLING
+// 9. PEER JOINED -> CREATE OFFER
 // ============================================================
-// ICE finds possible network paths.
 //
-// Example candidates:
+// Existing users receive this event when a new user joins.
 //
-// Local IP
-// Public IP discovered through STUN
-// Relay through TURN
-//
-// These candidates must be exchanged through
-// our signaling server.
+// Example:
+// Bob joins.
+// Alice creates a dedicated connection to Bob and sends Bob
+// an SDP offer.
 //
 // ============================================================
 
+socket.on(
+    "peer-joined",
+
+    async (peerId) => {
+        try {
+            console.log(
+                "Peer joined:",
+                peerId
+            );
 
 
-peerConnection.onicecandidate = (event)=>{
+            const user =
+                ensureUser(peerId);
+
+            const pc =
+                user.peerConnection;
 
 
-    if(event.candidate){
+            // Attach our microphone to Bob's connection.
+            addLocalTracks(pc);
 
 
-        console.log(
-            "Sending ICE candidate"
-        );
+            // Create negotiation proposal.
+            const offer =
+                await pc.createOffer();
+
+            await pc.setLocalDescription(offer);
 
 
+            // Route the offer only to Bob.
+            socket.emit("offer", {
+                targetId: peerId,
+                offer: pc.localDescription
+            });
 
-        socket.emit(
-            "ice-candidate",
-            {
 
-                roomId: ROOM_ID,
+            console.log(
+                "Offer sent to:",
+                peerId
+            );
+        } catch (error) {
+            console.error(
+                `Offer creation failed for ${peerId}:`,
+                error
+            );
+        }
+    }
+);
 
-                candidate:event.candidate
 
+// ============================================================
+// 10. RECEIVE OFFER -> CREATE ANSWER
+// ============================================================
+//
+// The receiver:
+//
+// 1. Identifies the sender
+// 2. Creates sender-specific user state
+// 3. Adds local microphone
+// 4. Stores remote offer
+// 5. Creates answer
+// 6. Sends answer back to sender
+//
+// ============================================================
+
+socket.on(
+    "offer",
+
+    async ({ senderId, offer }) => {
+        try {
+            console.log(
+                "Offer received from:",
+                senderId
+            );
+
+
+            const user =
+                ensureUser(senderId);
+
+            const pc =
+                user.peerConnection;
+
+
+            // Our microphone must also travel back
+            // through this dedicated connection.
+            addLocalTracks(pc);
+
+
+            await pc.setRemoteDescription(offer);
+
+
+            // Remote SDP now exists, so queued ICE is safe.
+            await flushPendingIceCandidates(senderId);
+
+
+            const answer =
+                await pc.createAnswer();
+
+            await pc.setLocalDescription(answer);
+
+
+            socket.emit("answer", {
+                targetId: senderId,
+                answer: pc.localDescription
+            });
+
+
+            console.log(
+                "Answer sent to:",
+                senderId
+            );
+        } catch (error) {
+            console.error(
+                `Offer handling failed for ${senderId}:`,
+                error
+            );
+        }
+    }
+);
+
+
+// ============================================================
+// 11. RECEIVE ANSWER
+// ============================================================
+//
+// We previously sent an offer.
+// The answer completes SDP negotiation for that user's
+// dedicated PeerConnection.
+//
+// ============================================================
+
+socket.on(
+    "answer",
+
+    async ({ senderId, answer }) => {
+        try {
+            const user =
+                users[senderId];
+
+            if (!user) {
+                console.warn(
+                    "Answer received for unknown user:",
+                    senderId
+                );
+                return;
             }
 
-        );
 
+            const pc =
+                user.peerConnection;
 
-    }
 
+            await pc.setRemoteDescription(answer);
 
-};
 
+            // Apply ICE candidates that arrived early.
+            await flushPendingIceCandidates(senderId);
 
 
-
-
-// Receive ICE candidates from the other peer
-
-
-socket.on(
-"ice-candidate",
-
-async(candidate)=>{
-
-
-    try{
-
-
-        await peerConnection.addIceCandidate(
-            candidate
-        );
-
-
-        console.log(
-            "ICE candidate added"
-        );
-
-
-    }
-
-    catch(error){
-
-
-        console.error(
-            "ICE error:",
-            error
-        );
-
-
-    }
-
-
-});
-
-
-
-
-
-
-
-
-
-// ============================================================
-// CONNECTION DEBUGGING
-// ============================================================
-
-
-peerConnection.oniceconnectionstatechange = ()=>{
-
-
-    console.log(
-
-        "ICE State:",
-        peerConnection.iceConnectionState
-
-    );
-
-
-};
-
-
-
-
-peerConnection.onconnectionstatechange = ()=>{
-
-
-    console.log(
-
-        "Connection State:",
-        peerConnection.connectionState
-
-    );
-
-
-};
-
-
-
-
-peerConnection.onsignalingstatechange = ()=>{
-
-
-    console.log(
-
-        "Signaling State:",
-        peerConnection.signalingState
-
-    );
-
-
-};
-
-
-
-
-
-
-
-
-
-// ============================================================
-// OFFER CREATION
-// ============================================================
-// When a new peer joins:
-//
-// Existing user creates OFFER.
-//
-// Offer contains:
-//
-// - Supported codecs
-// - Media capabilities
-// - Transport information
-//
-// Then it is sent through Socket.io.
-//
-// ============================================================
-
-
-socket.on(
-"peer-joined",
-
-async(peerId)=>{
-
-
-    console.log(
-        "Peer joined:",
-        peerId
-    );
-
-
-
-    const offer =
-        await peerConnection.createOffer();
-
-
-
-    console.log(
-        "Offer created"
-    );
-
-
-
-    await peerConnection.setLocalDescription(
-        offer
-    );
-
-
-    console.log(
-        "Local Description Set"
-    );
-
-
-
-    socket.emit(
-        "offer",
-        {
-
-            roomId:ROOM_ID,
-
-            offer:offer
-
+            console.log(
+                "Negotiation complete with:",
+                senderId
+            );
+        } catch (error) {
+            console.error(
+                `Answer handling failed for ${senderId}:`,
+                error
+            );
         }
-
-    );
-
-
-});
-
-
-
-
-
-
-
-
-
-// ============================================================
-// RECEIVE OFFER
-// ============================================================
-// Other peer receives offer.
-//
-// It stores it as remote description.
-//
-// Then creates an answer.
-//
-// ============================================================
-
-
-
-socket.on(
-"offer",
-
-async(offer)=>{
-
-
-    console.log(
-        "Offer Received"
-    );
-
-
-
-    await peerConnection.setRemoteDescription(
-        offer
-    );
-
-
-
-    console.log(
-        "Remote Description Set"
-    );
-
-
-
-    const answer =
-        await peerConnection.createAnswer();
-
-
-
-    console.log(
-        "Answer Created"
-    );
-
-
-
-    await peerConnection.setLocalDescription(
-        answer
-    );
-
-
-
-    console.log(
-        "Local Description Set"
-    );
-
-
-
-    socket.emit(
-        "answer",
-        {
-
-            roomId:ROOM_ID,
-
-            answer:answer
-
-        }
-
-    );
-
-
-});
-
-
-
-
-
-
-
-
-
-// ============================================================
-// RECEIVE ANSWER
-// ============================================================
-// Original sender receives answer.
-//
-// Now both peers know:
-//
-// "We agree on how we communicate."
-//
-// SDP negotiation is complete.
-// ============================================================
-
-
-
-socket.on(
-"answer",
-
-async(answer)=>{
-
-
-    console.log(
-        "Answer Received"
-    );
-
-
-
-    await peerConnection.setRemoteDescription(
-        answer
-    );
-
-
-
-    console.log(
-        "Negotiation Complete"
-    );
-
-
-});
-
-
-
-
-
-
-
-
-
-// ============================================================
-// RECEIVE REMOTE AUDIO
-// ============================================================
-// This is where WebRTC connects with Web Audio.
-//
-// Before:
-//
-// Remote Stream → <audio> → Speaker
-//
-//
-// Now:
-//
-// Remote Stream
-//       |
-//       ↓
-// MediaStreamAudioSourceNode
-//       |
-//       ↓
-// AudioContext
-//       |
-//       ↓
-// Speakers
-//
-// Later:
-//
-// AudioContext
-//       |
-//       ↓
-// GainNode
-//       |
-//       ↓
-// PannerNode
-//       |
-//       ↓
-// Speakers
-//
-// ============================================================
-
-
-
-peerConnection.ontrack = async(event)=>{
-
-
-    console.log(
-        "Remote Track Received"
-    );
-
-
-
-    // Create a MediaStream
-    // and put the incoming track inside it
-
-    const remoteStream =
-        new MediaStream();
-
-
-
-    remoteStream.addTrack(
-        event.track
-    );
-
-
-
-    // Browsers sometimes suspend AudioContext
-    // until user interaction
-
-    if(audioContext.state==="suspended"){
-
-        await audioContext.resume();
-
     }
+);
 
 
+// ============================================================
+// 12. RECEIVE ICE CANDIDATE
+// ============================================================
+//
+// senderId tells us exactly which PeerConnection owns
+// this candidate.
+//
+// ============================================================
+
+socket.on(
+    "ice-candidate",
+
+    async ({ senderId, candidate }) => {
+        try {
+            // Signaling may deliver ICE before another event
+            // has created this user's local state.
+            const user =
+                ensureUser(senderId);
+
+            const pc =
+                user.peerConnection;
 
 
-    // Convert WebRTC MediaStream
-    // into Web Audio node
+            // ICE cannot always be applied before remote SDP.
+            if (!pc.remoteDescription) {
+                user.pendingIceCandidates.push(candidate);
 
-    const source =
-        audioContext.createMediaStreamSource(
-            remoteStream
-        );
+                console.log(
+                    "ICE candidate queued for:",
+                    senderId
+                );
 
-
-
-
-    // Connect audio to speakers
-
-    source.connect(
-        audioContext.destination
-    );
+                return;
+            }
 
 
-
-    console.log(
-        "Remote audio connected through Web Audio"
-    );
+            await pc.addIceCandidate(candidate);
 
 
-};
+            console.log(
+                "ICE candidate added for:",
+                senderId
+            );
+        } catch (error) {
+            console.error(
+                `ICE handling failed for ${senderId}:`,
+                error
+            );
+        }
+    }
+);
+
+
+// ============================================================
+// 13. USER LEFT
+// ============================================================
+//
+// Remove the departed user's:
+//
+// - audio graph
+// - WebRTC connection
+// - local state
+//
+// ============================================================
+
+socket.on(
+    "user-left",
+
+    (userId) => {
+        removeUser(userId);
+    }
+);

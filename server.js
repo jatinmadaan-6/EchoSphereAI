@@ -78,13 +78,14 @@ io.on(
         //
         socket.on(
             "join-room",
-
-            (roomId) => {
+ 
+          ({ roomId , username }) => {
                 socket.join(roomId);
 
 
                 // Remember room membership for cleanup.
                 socket.data.roomId = roomId;
+                socket.data.username = username;
 
 
                 console.log(

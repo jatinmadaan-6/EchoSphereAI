@@ -24,7 +24,7 @@
 // 1. CONFIGURATION
 // ============================================================
 
-const ROOM_ID = "test-room";
+// ROOM_ID is now supplied at runtime by the join screen (ui.js).
 
 const ICE_SERVERS = [
     {
@@ -47,7 +47,9 @@ const audioContext = new AudioContext();
 
 // Local microphone stream.
 // The same tracks are attached to each peer connection.
+// Exposed on window so ui.js can toggle mute without an import.
 let localStream = null;
+window.localStream = null;
 
 // Central store for all remote users.
 const users = {};
@@ -62,31 +64,33 @@ function createUser(userId) {
     return {
         id: userId,
 
-        // One WebRTC connection per remote user.
+        // Human-readable display name.
+        username: null,
+
         peerConnection: createPeerConnection(userId),
 
-        // Filled when the remote audio track arrives.
         audio: null,
 
-        // World position is the source of truth.
-        // Later Three.js and PannerNode will consume this.
         position: {
             x: 0,
             y: 0,
             z: 0
         },
 
-        // ICE can arrive before remote SDP is ready.
-        // Queue early candidates and apply them later.
         pendingIceCandidates: []
     };
 }
 
 
 // Returns an existing user or creates one.
-function ensureUser(userId) {
+function ensureUser(userId, username = null) {
+
     if (!users[userId]) {
         users[userId] = createUser(userId);
+    }
+
+    if (username) {
+        users[userId].username = username;
     }
 
     return users[userId];
@@ -327,8 +331,12 @@ function createPeerConnection(userId) {
 async function initializeMedia() {
     localStream =
         await navigator.mediaDevices.getUserMedia({
-            audio: true
+            audio: true,
+            video: false
         });
+
+    // Keep window reference in sync for ui.js mute control.
+    window.localStream = localStream;
 
     console.log(
         "Local microphone ready"
@@ -338,17 +346,15 @@ async function initializeMedia() {
 
 // Attaches our microphone tracks to one peer connection.
 function addLocalTracks(pc) {
-    if (!localStream) {
-        throw new Error(
-            "Local microphone is not initialized"
-        );
+
+    if (pc.getSenders().length > 0) {
+        return;
     }
 
-    localStream.getTracks().forEach((track) => {
+    localStream.getTracks().forEach(track => {
         pc.addTrack(track, localStream);
     });
 }
-
 
 // ============================================================
 // 7. ICE QUEUE MANAGEMENT
@@ -383,28 +389,43 @@ async function flushPendingIceCandidates(userId) {
 //
 // ============================================================
 
-async function start() {
-    try {
-        await initializeMedia();
+// Called by ui.js join button — never runs automatically.
+async function start(roomId, username) {
+    await initializeMedia();
 
-        socket.emit(
-            "join-room",
-            ROOM_ID
-        );
+    socket.emit(
+        "join-room",
+        { roomId, username }
+    );
 
-        console.log(
-            "Joined room:",
-            ROOM_ID
-        );
-    } catch (error) {
-        console.error(
-            "Application startup failed:",
-            error
-        );
-    }
+    console.log(
+        "Joined room:",
+        roomId
+    );
 }
 
-start();
+// Exposed so ui.js can call it.
+window.startApp = start;
+
+
+// ============================================================
+// 8b. LEAVE ROOM
+// ============================================================
+
+// Closes all peer connections and stops the microphone.
+window.leaveRoom = function () {
+    for (const userId of Object.keys(users)) {
+        removeUser(userId);
+    }
+
+    if (localStream) {
+        localStream.getTracks().forEach((t) => t.stop());
+        localStream       = null;
+        window.localStream = null;
+    }
+
+    console.log("Left room.");
+};
 
 
 // ============================================================
@@ -419,56 +440,59 @@ start();
 // an SDP offer.
 //
 // ============================================================
+socket.on(
+    "existing-peers",
 
+    async (existingPeers) => {
+
+        console.log(
+            "Existing peers:",
+            existingPeers
+        );
+
+        for (const { peerId, username } of existingPeers) {
+
+            // Store existing participants.
+            // Existing users will initiate offers to us.
+            ensureUser(peerId, username);
+
+            // Show immediately in the participants list.
+            window.uiAddPeer?.(peerId, username);
+        }
+    }
+);
 socket.on(
     "peer-joined",
 
-    async (peerId) => {
+    async ({ peerId, username }) => {
         try {
+
             console.log(
-                "Peer joined:",
-                peerId
+                `${username} joined (${peerId})`
             );
 
+            const user = ensureUser(peerId, username);
 
-            const user =
-                ensureUser(peerId);
+            window.uiAddPeer?.(peerId, username);
 
-            const pc =
-                user.peerConnection;
+            const pc = user.peerConnection;
 
-
-            // Attach our microphone to Bob's connection.
             addLocalTracks(pc);
 
-
-            // Create negotiation proposal.
-            const offer =
-                await pc.createOffer();
+            const offer = await pc.createOffer();
 
             await pc.setLocalDescription(offer);
 
-
-            // Route the offer only to Bob.
             socket.emit("offer", {
                 targetId: peerId,
                 offer: pc.localDescription
             });
 
-
-            console.log(
-                "Offer sent to:",
-                peerId
-            );
         } catch (error) {
-            console.error(
-                `Offer creation failed for ${peerId}:`,
-                error
-            );
+            console.error(error);
         }
     }
 );
-
 
 // ============================================================
 // 10. RECEIVE OFFER -> CREATE ANSWER
@@ -488,16 +512,15 @@ socket.on(
 socket.on(
     "offer",
 
-    async ({ senderId, offer }) => {
+    async ({ senderId, username, offer }) => {
         try {
             console.log(
-                "Offer received from:",
-                senderId
+                `Offer received from ${username} (${senderId})`
             );
 
 
             const user =
-                ensureUser(senderId);
+                ensureUser(senderId, username);
 
             const pc =
                 user.peerConnection;
@@ -554,10 +577,11 @@ socket.on(
 socket.on(
     "answer",
 
-    async ({ senderId, answer }) => {
+    async ({ senderId, username, answer }) => {
         try {
-            const user =
-                users[senderId];
+            // ensureUser is safe here: the peer already exists
+            // because we sent them an offer in peer-joined.
+            const user = users[senderId];
 
             if (!user) {
                 console.warn(
@@ -567,21 +591,18 @@ socket.on(
                 return;
             }
 
+            // Update username in case it wasn't set yet.
+            if (username) user.username = username;
 
-            const pc =
-                user.peerConnection;
-
+            const pc = user.peerConnection;
 
             await pc.setRemoteDescription(answer);
-
 
             // Apply ICE candidates that arrived early.
             await flushPendingIceCandidates(senderId);
 
-
             console.log(
-                "Negotiation complete with:",
-                senderId
+                `Negotiation complete with ${username} (${senderId})`
             );
         } catch (error) {
             console.error(
@@ -661,7 +682,8 @@ socket.on(
 socket.on(
     "user-left",
 
-    (userId) => {
-        removeUser(userId);
+    ({ peerId }) => {
+        removeUser(peerId);
+        window.uiRemovePeer?.(peerId);
     }
 );

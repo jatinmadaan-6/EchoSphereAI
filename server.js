@@ -79,13 +79,27 @@ io.on(
         socket.on(
             "join-room",
  
-          ({ roomId , username }) => {
+          async ({ roomId , username }) => {
                 socket.join(roomId);
 
 
                 // Remember room membership for cleanup.
                 socket.data.roomId = roomId;
                 socket.data.username = username;
+
+
+                // Build a snapshot of everyone already in the room.
+const sockets = await io.in(roomId).fetchSockets();
+
+const existingPeers = sockets
+    .filter((s) => s.id !== socket.id)
+    .map((s) => ({
+        peerId: s.id,
+        username: s.data.username
+    }));
+
+// Give the new user the current room state.
+socket.emit("existing-peers", existingPeers);
 
 
                 console.log(
@@ -98,7 +112,10 @@ io.on(
                     .to(roomId)
                     .emit(
                         "peer-joined",
-                        socket.id
+                        {
+                            peerId: socket.id,
+                            username: socket.data.username
+                        }
                     );
             }
         );
@@ -121,6 +138,7 @@ io.on(
                         "offer",
                         {
                             senderId: socket.id,
+                            username: socket.data.username,
                             offer
                         }
                     );
@@ -149,6 +167,7 @@ io.on(
                         "answer",
                         {
                             senderId: socket.id,
+                            username: socket.data.username,
                             answer
                         }
                     );
@@ -205,7 +224,10 @@ io.on(
                         .to(roomId)
                         .emit(
                             "user-left",
-                            socket.id
+                            {
+                                peerId: socket.id,
+                                username: socket.data.username
+                            }
                         );
                 }
 

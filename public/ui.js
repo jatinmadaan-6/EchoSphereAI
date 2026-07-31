@@ -34,6 +34,7 @@ const participantsList  = document.getElementById("participants-list");
 const statusText        = document.getElementById("connection-status");
 const currentRoomLabel  = document.getElementById("current-room");
 const muteButton        = document.getElementById("mute-btn");
+const spatialButton     = document.getElementById("spatial-btn");
 const leaveButton       = document.getElementById("leave-btn");
 
 
@@ -42,6 +43,7 @@ const leaveButton       = document.getElementById("leave-btn");
 // ============================================================
 
 let isMuted       = false;
+let isSpatial      = false;
 let localUsername = "";
 
 
@@ -215,6 +217,12 @@ muteButton.addEventListener("click", () => {
     muteButton.classList.toggle("muted", isMuted);
 });
 
+spatialButton.addEventListener("click", () => {
+    isSpatial = !isSpatial;
+    window.setSpatialAudio?.(isSpatial);
+    spatialButton.textContent = `Spatial Audio: ${isSpatial ? "On" : "Off"}`;
+});
+
 
 // ============================================================
 // 8. LEAVE BUTTON
@@ -229,7 +237,9 @@ leaveButton.addEventListener("click", () => {
     // Reset UI.
     participantsList.innerHTML = "";
     isMuted = false;
+    isSpatial = false;
     muteButton.textContent = "Mute";
+    spatialButton.textContent = "Spatial Audio: Off";
     muteButton.classList.remove("muted");
     usernameInput.value = localUsername; // preserve last username
     window.uiSetStatus("Connecting...", "");

@@ -8,9 +8,38 @@
     <title>EchoSphere AI</title>
 
     <link rel="stylesheet" href="styles.css">
+    <script>
+        function logErr(msg, url, line, col, error) {
+            fetch('/log', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    type: 'error',
+                    message: msg,
+                    url: url,
+                    line: line,
+                    col: col,
+                    stack: error ? error.stack : null
+                })
+            }).catch(e => {});
+        }
+        window.onerror = logErr;
+        window.onunhandledrejection = function(event) {
+            fetch('/log', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    type: 'unhandledrejection',
+                    reason: event.reason ? (event.reason.message || String(event.reason)) : null,
+                    stack: event.reason ? event.reason.stack : null
+                })
+            }).catch(e => {});
+        };
+    </script>
 </head>
 
 <body>
+    <div id="world-container" aria-hidden="true"></div>
 
     <!-- ======================================================
          APPLICATION CONTAINER
@@ -115,6 +144,10 @@
 
                 </button>
 
+                <button id="spatial-btn" type="button">
+                    Spatial Audio: Off
+                </button>
+
                 <button id="leave-btn">
 
                     Leave Room
@@ -134,11 +167,15 @@
 
     <!-- Application core (defines window.startApp, window.leaveRoom) -->
 
-    <script src="app.js"></script>
+    <script type="module" src="app.js"></script>
 
     <!-- UI controller (calls window.startApp on join) -->
 
     <script src="ui.js"></script>
+
+    <!-- Position synchronization -->
+
+    <script type="module" src="network/positionSync.js"></script>
 
 </body>
 

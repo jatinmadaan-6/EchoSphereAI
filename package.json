@@ -1,13 +1,13 @@
 {
   "name": "echosphereai",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "server.js",
   "directories": {
     "doc": "docs"
   },
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test"
   },
   "keywords": [],
   "author": "",
@@ -15,6 +15,7 @@
   "description": "",
   "dependencies": {
     "express": "^5.2.1",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.3",
+    "three": "^0.185.1"
   }
 }

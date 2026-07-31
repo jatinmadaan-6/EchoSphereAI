@@ -1,6 +1,8 @@
 // ============================================================
 // ECHOSPHERE AI — CLIENT
 // ============================================================
+import { createAvatar, removeAvatar, updateAvatarPosition } from "./world/avatar.js";
+import { initWorld } from "./world/world.js";
 //
 // Current architecture:
 //
@@ -26,7 +28,7 @@
 
 // ROOM_ID is now supplied at runtime by the join screen (ui.js).
 
-const ICE_SERVERS = [
+let iceServers = [
     {
         urls: "stun:stun.l.google.com:19302"
     }
@@ -40,19 +42,51 @@ const ICE_SERVERS = [
 // Socket.IO handles signaling only.
 // Audio does not travel through this socket.
 const socket = io();
+window.socket = socket;
+
+// Define local user state structure
+window.localUser = {
+    id: "local",
+    username: null,
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { x: 0, y: 0, z: 0 },
+    avatar: null
+};
 
 // One AudioContext represents the shared audio world.
 // Each remote user gets a separate branch inside this context.
 const audioContext = new AudioContext();
+
+export function updateAudioListener(position) {
+    if (audioContext && audioContext.listener) {
+        const listener = audioContext.listener;
+        // Check for modern AudioListener.positionX AudioParam support
+        if (listener.positionX) {
+            listener.positionX.value = position.x;
+            listener.positionY.value = position.y;
+            listener.positionZ.value = position.z;
+        } else {
+            // Fallback for older browsers
+            listener.setPosition(position.x, position.y, position.z);
+        }
+    }
+}
+window.updateAudioListener = updateAudioListener;
 
 // Local microphone stream.
 // The same tracks are attached to each peer connection.
 // Exposed on window so ui.js can toggle mute without an import.
 let localStream = null;
 window.localStream = null;
+let activeRoom = null;
+let shouldRejoin = false;
+// Start with the reliable full-volume path; users can enable the 3D stage once
+// their audio device is verified.
+let spatialAudioEnabled = false;
 
 // Central store for all remote users.
 const users = {};
+window.users = users; // expose remote users for reference/debugging
 
 
 // ============================================================
@@ -77,20 +111,35 @@ function createUser(userId) {
             z: 0
         },
 
+        rotation: {
+            x: 0,
+            y: 0,
+            z: 0
+        },
+
+        avatar: null,
+
         pendingIceCandidates: []
     };
 }
 
 
 // Returns an existing user or creates one.
-function ensureUser(userId, username = null) {
+function ensureUser(userId, username = null, position = null) {
 
     if (!users[userId]) {
         users[userId] = createUser(userId);
+        users[userId].avatar = createAvatar(userId);
     }
 
     if (username) {
         users[userId].username = username;
+    }
+
+    if (position) {
+        users[userId].position = position;
+        users[userId].targetPosition = position;
+        updateAvatarPosition(userId, position);
     }
 
     return users[userId];
@@ -108,16 +157,20 @@ function removeUser(userId) {
         user.audio.source?.disconnect();
         user.audio.gainNode?.disconnect();
         user.audio.panner?.disconnect();
+        user.audio.element?.pause();
+        user.audio.element?.remove();
     }
 
     // End the WebRTC connection.
     user.peerConnection?.close();
 
+    // Clean up Three.js avatar mesh
+    removeAvatar(userId);
+
     delete users[userId];
 
     console.log("User removed:", userId);
 }
-
 
 // ============================================================
 // 4. WEB AUDIO PIPELINE
@@ -135,7 +188,7 @@ function removeUser(userId) {
 //
 // ============================================================
 
-function createSpatialAudio(stream) {
+function createSpatialAudio(stream, position = null) {
     const source =
         audioContext.createMediaStreamSource(stream);
 
@@ -144,6 +197,16 @@ function createSpatialAudio(stream) {
 
     const panner =
         audioContext.createPanner();
+
+    // Native media playback is used as the non-spatial baseline. It avoids
+    // browser-specific Web Audio output behavior while retaining the exact
+    // remote WebRTC stream.
+    const element = document.createElement("audio");
+    element.autoplay = true;
+    element.playsInline = true;
+    element.srcObject = stream;
+    element.hidden = true;
+    document.body.appendChild(element);
 
 
     // Default volume.
@@ -160,25 +223,56 @@ function createSpatialAudio(stream) {
     panner.rolloffFactor = 1;
 
 
-    // Temporary default position.
-    // Later this comes from user.position.
-    panner.positionX.value = 0;
-    panner.positionY.value = 0;
-    panner.positionZ.value = -5;
+    // Initial position.
+    if (position) {
+        if (panner.positionX) {
+            panner.positionX.value = position.x;
+            panner.positionY.value = position.y;
+            panner.positionZ.value = position.z;
+        } else {
+            panner.setPosition(position.x, position.y, position.z);
+        }
+    } else {
+        panner.positionX.value = 0;
+        panner.positionY.value = 0;
+        panner.positionZ.value = -5;
+    }
 
 
     // Build this user's audio branch.
     source.connect(gainNode);
-    gainNode.connect(panner);
-    panner.connect(audioContext.destination);
+    applyAudioOutput({ gainNode, panner, element });
 
 
     return {
         source,
         gainNode,
-        panner
+        panner,
+        element
     };
 }
+
+function applyAudioOutput(audio) {
+    audio.gainNode.disconnect();
+    audio.panner.disconnect();
+    if (spatialAudioEnabled) {
+        audio.element?.pause();
+        audio.gainNode.connect(audio.panner);
+        audio.panner.connect(audioContext.destination);
+    } else {
+        audio.element?.play().catch((error) => {
+            console.error("Native remote audio playback failed:", error);
+            window.uiSetStatus?.("Browser blocked remote audio playback. Click Spatial Audio once, then turn it off.", "error");
+        });
+    }
+}
+
+window.setSpatialAudio = function (enabled) {
+    spatialAudioEnabled = enabled;
+    for (const user of Object.values(users)) {
+        if (user.audio) applyAudioOutput(user.audio);
+    }
+};
 
 
 // ============================================================
@@ -196,7 +290,7 @@ function createSpatialAudio(stream) {
 
 function createPeerConnection(userId) {
     const pc = new RTCPeerConnection({
-        iceServers: ICE_SERVERS
+        iceServers
     });
 
 
@@ -241,6 +335,10 @@ function createPeerConnection(userId) {
             event.streams[0] ||
             new MediaStream([event.track]);
 
+        event.track.onunmute = () => window.uiSetStatus?.("Receiving voice", "connected");
+        event.track.onmute = () => window.uiSetStatus?.("Remote microphone is muted", "error");
+        event.track.onended = () => window.uiSetStatus?.("Remote microphone stopped", "error");
+
 
         // Browsers may suspend AudioContext until interaction.
         if (audioContext.state === "suspended") {
@@ -271,11 +369,15 @@ function createPeerConnection(userId) {
             user.audio.source?.disconnect();
             user.audio.gainNode?.disconnect();
             user.audio.panner?.disconnect();
+            user.audio.element?.pause();
+            user.audio.element?.remove();
         }
 
 
         user.audio =
-            createSpatialAudio(remoteStream);
+            createSpatialAudio(remoteStream, user.position);
+
+        window.uiSetStatus?.("Voice connected", "connected");
 
 
         console.log(
@@ -302,6 +404,9 @@ function createPeerConnection(userId) {
             `Connection State [${userId}]:`,
             pc.connectionState
         );
+        if (pc.connectionState === "failed") {
+            window.uiSetStatus?.("Voice connection failed. Check TURN/HTTPS configuration.", "error");
+        }
     };
 
 
@@ -391,12 +496,29 @@ async function flushPendingIceCandidates(userId) {
 
 // Called by ui.js join button — never runs automatically.
 async function start(roomId, username) {
+    // Resume during the join click. Waiting for a remote track is too late for
+    // autoplay-restricted browsers, which would otherwise keep every voice silent.
+    if (audioContext.state === "suspended") {
+        await audioContext.resume();
+    }
+    const response = await fetch("/config");
+    if (!response.ok) throw new Error("Could not load connection configuration.");
+    const config = await response.json();
+    if (Array.isArray(config.iceServers) && config.iceServers.length) iceServers = config.iceServers;
+    if (!socket.connected) {
+        socket.connect();
+        await new Promise((resolve, reject) => {
+            socket.once("connect", resolve);
+            socket.once("connect_error", reject);
+        });
+    }
+    initWorld();
     await initializeMedia();
-
-    socket.emit(
-        "join-room",
-        { roomId, username }
-    );
+    await new Promise((resolve, reject) => socket.emit("join-room", { roomId, username }, (result) => {
+        result?.ok ? resolve() : reject(new Error(result?.error || "Could not join room."));
+    }));
+    activeRoom = { roomId, username };
+    shouldRejoin = true;
 
     console.log(
         "Joined room:",
@@ -414,18 +536,38 @@ window.startApp = start;
 
 // Closes all peer connections and stops the microphone.
 window.leaveRoom = function () {
+    shouldRejoin = false;
+    activeRoom = null;
     for (const userId of Object.keys(users)) {
         removeUser(userId);
     }
+    removeAvatar("local");
+    window.localUser.avatar = null;
 
     if (localStream) {
         localStream.getTracks().forEach((t) => t.stop());
         localStream       = null;
         window.localStream = null;
     }
+    socket.disconnect();
 
     console.log("Left room.");
 };
+
+socket.on("connect", () => window.uiSetStatus?.("Connected", "connected"));
+socket.on("disconnect", () => {
+    for (const userId of Object.keys(users)) {
+        removeUser(userId);
+        window.uiRemovePeer?.(userId);
+    }
+    if (shouldRejoin) window.uiSetStatus?.("Reconnecting…", "");
+});
+socket.on("connect", () => {
+    if (!shouldRejoin || !activeRoom) return;
+    socket.emit("join-room", activeRoom, (result) => {
+        if (!result?.ok) window.uiSetStatus?.("Could not restore the room connection.", "error");
+    });
+});
 
 
 // ============================================================
@@ -440,6 +582,29 @@ window.leaveRoom = function () {
 // an SDP offer.
 //
 // ============================================================
+// Handle local player spawning
+socket.on("spawn", ({ position }) => {
+    console.log("Local player spawned at:", position);
+    if (window.localUser) {
+        window.localUser.position = position;
+        // Create local avatar mesh
+        window.localUser.avatar = createAvatar("local");
+        // Update its position
+        updateAvatarPosition("local", position);
+    }
+});
+
+
+// Handle remote player position/rotation updates
+socket.on("position-update", ({ peerId, position, rotation }) => {
+    const user = users[peerId];
+    if (user) {
+        user.targetPosition = position;
+        user.targetRotation = rotation;
+    }
+});
+
+
 socket.on(
     "existing-peers",
 
@@ -450,11 +615,11 @@ socket.on(
             existingPeers
         );
 
-        for (const { peerId, username } of existingPeers) {
+        for (const { peerId, username, position } of existingPeers) {
 
             // Store existing participants.
             // Existing users will initiate offers to us.
-            ensureUser(peerId, username);
+            ensureUser(peerId, username, position);
 
             // Show immediately in the participants list.
             window.uiAddPeer?.(peerId, username);
@@ -464,14 +629,14 @@ socket.on(
 socket.on(
     "peer-joined",
 
-    async ({ peerId, username }) => {
+    async ({ peerId, username, position }) => {
         try {
 
             console.log(
                 `${username} joined (${peerId})`
             );
 
-            const user = ensureUser(peerId, username);
+            const user = ensureUser(peerId, username, position);
 
             window.uiAddPeer?.(peerId, username);
 

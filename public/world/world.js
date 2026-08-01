@@ -3,6 +3,10 @@ import { updateRemoteAvatars } from "./avatar.js";
 import { updateLocalMovement } from "./movement.js";
 import {initCamera, updateCamera}
 from "./camera.js";
+import {
+    applyCameraRotation, initRotation, enablePointerLock, updateAvatarRotation
+}
+from "./rotation.js";
 
 let scene;
 let camera;
@@ -29,13 +33,18 @@ export function initWorld() {
         0.1,
         1000
     );
+    window.camera = camera; // Expose for debugging
     initCamera(camera);
+    initRotation(camera);
     camera.position.set(8, 7, 10);
     camera.lookAt(0, 0, 0);
 
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
+    enablePointerLock(
+        renderer.domElement
+    );
 
     const container = document.getElementById("world-container") || document.body;
     container.appendChild(renderer.domElement);
@@ -72,15 +81,16 @@ export function animate() {
     updateLocalMovement();
 
     updateRemoteAvatars();
+    updateAvatarRotation();
 
-
-      if (
+    if (
         window.localUser &&
         window.localUser.avatar
     ) {
         updateCamera(
             window.localUser.avatar.mesh
         );
+        applyCameraRotation();
     }
 
 

@@ -40,6 +40,29 @@ export function createAvatar(userId) {
     });
 
     const mesh = new THREE.Mesh(geometry, material);
+
+    const directionMarker =
+    new THREE.Mesh(
+        new THREE.ConeGeometry(
+            0.15,
+            0.4,
+            16
+        ),
+        new THREE.MeshStandardMaterial({
+            color: 0xff0000
+        })
+    );
+
+
+// Point cone forward
+directionMarker.rotation.x = Math.PI / 2;
+
+
+// Place it slightly in front
+directionMarker.position.z = -0.6;
+
+
+mesh.add(directionMarker);
     
     // Position it so the base rests on the ground (y = 0)
     // The center of the capsule is at y = (length / 2) + radius = 0.5 + 0.4 = 0.9

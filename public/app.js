@@ -57,21 +57,82 @@ window.localUser = {
 // One AudioContext represents the shared audio world.
 // Each remote user gets a separate branch inside this context.
 const audioContext = new AudioContext();
+window.updateAudioListener = function(position){
 
-export function updateAudioListener(position) {
-    if (audioContext && audioContext.listener) {
-        const listener = audioContext.listener;
-        // Check for modern AudioListener.positionX AudioParam support
-        if (listener.positionX) {
-            listener.positionX.value = position.x;
-            listener.positionY.value = position.y;
-            listener.positionZ.value = position.z;
-        } else {
-            // Fallback for older browsers
-            listener.setPosition(position.x, position.y, position.z);
-        }
+    const listener =
+        audioContext.listener;
+
+
+    // Update listener position
+
+    listener.positionX.value =
+        position.x;
+
+    listener.positionY.value =
+        position.y;
+
+    listener.positionZ.value =
+        position.z;
+
+
+
+    const camera =
+        window.camera;
+
+
+    if(!camera)
+        return;
+
+
+
+    const forward =
+        new THREE.Vector3();
+
+
+    camera.getWorldDirection(
+        forward
+    );
+
+
+    const up =
+        new THREE.Vector3(
+            0,
+            1,
+            0
+        );
+
+
+
+    /*
+        Tell Web Audio:
+
+        "My ears are facing this direction"
+    */
+
+    if(listener.forwardX){
+
+        listener.forwardX.value =
+            forward.x;
+
+        listener.forwardY.value =
+            forward.y;
+
+        listener.forwardZ.value =
+            forward.z;
+
+
+        listener.upX.value =
+            up.x;
+
+        listener.upY.value =
+            up.y;
+
+        listener.upZ.value =
+            up.z;
+
     }
-}
+
+};
 window.updateAudioListener = updateAudioListener;
 
 // Local microphone stream.
@@ -607,7 +668,22 @@ socket.on("position-update", ({ peerId, position, rotation }) => {
 
 
 socket.on(
-    "existing-peers",
+"position-update",
+
+({peerId, position, rotation}) => {
+
+    const user =
+        ensureUser(peerId);
+
+
+    user.targetPosition =
+        position;
+
+
+    user.targetRotation =
+        rotation;
+
+});
 
     async (existingPeers) => {
 
@@ -626,7 +702,7 @@ socket.on(
             window.uiAddPeer?.(peerId, username);
         }
     }
-);
+
 socket.on(
     "peer-joined",
 

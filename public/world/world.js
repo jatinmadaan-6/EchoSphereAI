@@ -1,6 +1,8 @@
 import * as THREE from "/vendor/three/three.module.js";
 import { updateRemoteAvatars } from "./avatar.js";
 import { updateLocalMovement } from "./movement.js";
+import {initCamera, updateCamera}
+from "./camera.js";
 
 let scene;
 let camera;
@@ -27,6 +29,7 @@ export function initWorld() {
         0.1,
         1000
     );
+    initCamera(camera);
     camera.position.set(8, 7, 10);
     camera.lookAt(0, 0, 0);
 
@@ -62,14 +65,29 @@ export function initWorld() {
 }
 
 export function animate() {
+
     requestAnimationFrame(animate);
 
+
     updateLocalMovement();
+
     updateRemoteAvatars();
 
-    if (renderer && scene && camera) {
-        renderer.render(scene, camera);
+
+      if (
+        window.localUser &&
+        window.localUser.avatar
+    ) {
+        updateCamera(
+            window.localUser.avatar.mesh
+        );
     }
+
+
+    renderer.render(
+        scene,
+        camera
+    );
 }
 
 export function getScene() {

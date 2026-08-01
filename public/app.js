@@ -18,6 +18,7 @@ import { initWorld } from "./world/world.js";
 //   ├── audio
 //   ├── position
 //   └── pendingIceCandidates
+     //& avatar
 //
 // ============================================================
 

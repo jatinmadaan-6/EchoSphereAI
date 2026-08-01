@@ -1,6 +1,9 @@
 import * as THREE from "/vendor/three/three.module.js";
 import { getScene } from "./world.js";
-
+import {
+    canHear
+}
+from "./audioRules.js";
 // Keep track of all active avatars: userId -> { mesh, userId }
 const avatars = {};
 
@@ -135,9 +138,32 @@ export function getAvatars() {
  * Iterates through remote users and smoothly interpolates their visual avatar meshes
  * towards their network targetPositions.
  */
+
+
 export function updateRemoteAvatars() {
     const users = window.users;
     if (!users) return;
+      
+     
+const localUser =
+    window.localUser;
+
+
+if(
+    !canHear(
+        localUser,
+        user
+    )
+){
+
+    user.audio.gainNode.gain.value = 0;
+
+}
+else{
+
+    user.audio.gainNode.gain.value = 1;
+
+}
 
     for (const userId in users) {
         const user = users[userId];

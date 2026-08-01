@@ -261,6 +261,9 @@ export function updateLocalMovement() {
         );
 
 
+    const zone =
+    getZone(localUser.position);
+
 
     // Update Three.js avatar position
 

@@ -3,6 +3,7 @@
 // ============================================================
 import { createAvatar, removeAvatar, updateAvatarPosition } from "./world/avatar.js";
 import { initWorld } from "./world/world.js";
+import zoneId from "./world/zone.js";
 //
 // Current architecture:
 //
@@ -51,7 +52,9 @@ window.localUser = {
     username: null,
     position: { x: 0, y: 0, z: 0 },
     rotation: { x: 0, y: 0, z: 0 },
-    avatar: null
+    avatar: null,
+    zoneId: null   
+
 };
 
 // One AudioContext represents the shared audio world.
@@ -181,6 +184,8 @@ function createUser(userId) {
 
         avatar: null,
 
+        zoneId:null,
+
         pendingIceCandidates: []
     };
 }
@@ -207,6 +212,13 @@ function ensureUser(userId, username = null, position = null) {
     return users[userId];
 }
 
+
+if(zone){
+
+    localUser.zoneId =
+        zone.id;
+
+}
 
 // Removes all resources owned by one remote user.
 function removeUser(userId) {
@@ -278,12 +290,19 @@ function createSpatialAudio(stream, position = null) {
     // HRTF provides more realistic directional audio.
     panner.panningModel = "HRTF";
 
-    // Distance behavior for future 3D movement.
-    panner.distanceModel = "inverse";
-    panner.refDistance = 1;
-    panner.maxDistance = 100;
-    panner.rolloffFactor = 1;
+panner.distanceModel = "inverse";
 
+panner.refDistance = 2;
+
+panner.maxDistance = 25;
+
+panner.rolloffFactor = 2;
+
+panner.coneInnerAngle = 360;
+
+panner.coneOuterAngle = 360;
+
+panner.coneOuterGain = 1;
 
     // Initial position.
     if (position) {
@@ -658,13 +677,7 @@ socket.on("spawn", ({ position }) => {
 
 
 // Handle remote player position/rotation updates
-socket.on("position-update", ({ peerId, position, rotation }) => {
-    const user = users[peerId];
-    if (user) {
-        user.targetPosition = position;
-        user.targetRotation = rotation;
-    }
-});
+
 
 
 socket.on(
@@ -683,6 +696,7 @@ socket.on(
     user.targetRotation =
         rotation;
 
+    user.zoneId = zoneId
 });
 
     async (existingPeers) => {
